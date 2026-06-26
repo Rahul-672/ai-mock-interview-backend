@@ -90,23 +90,10 @@ public class SecurityConfig {
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
-        configuration.setAllowedOrigins(List.of("http://localhost:5173"));
-        configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
-        configuration.setAllowedHeaders(List.of("*"));
-        configuration.setAllowCredentials(true);
 
-        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
-        source.registerCorsConfiguration("/**", configuration);
-        return source;
-    }
-
-    @Bean
-    public CorsConfigurationSource corsConfigurationSource() {
-        CorsConfiguration configuration = new CorsConfiguration();
-
-        String allowedOrigins = System.getenv("ALLOWED_ORIGINS");
-        List<String> origins = allowedOrigins != null
-                ? List.of(allowedOrigins.split(","))
+        String allowedOriginsEnv = System.getenv("ALLOWED_ORIGINS");
+        List<String> origins = allowedOriginsEnv != null
+                ? List.of(allowedOriginsEnv.split(","))
                 : List.of("http://localhost:5173");
 
         configuration.setAllowedOrigins(origins);
