@@ -318,4 +318,70 @@ public class InterviewService {
                 .score(score)
                 .build());
     }
+
+    public InterviewResponse startInterviewWithResume(
+            ResumeInterviewRequest request) {
+        User user = getCurrentUser();
+
+        InterviewSession session = InterviewSession.builder()
+                .user(user)
+                .role("Resume Based")
+                .difficulty(request.getDifficulty())
+                .totalQuestions(TOTAL_QUESTIONS)
+                .build();
+        session = sessionRepository.save(session);
+
+        String firstQuestion = askAiForQuestionFromResume(
+                session, request.getResumeText(), 1);
+
+        saveMessage(session, "assistant", firstQuestion, 1, null);
+        session.setCurrentQuestion(1);
+        sessionRepository.save(session);
+
+        return InterviewResponse.builder()
+                .sessionId(session.getId())
+                .message(firstQuestion)
+                .questionNumber(1)
+                .totalQuestions(TOTAL_QUESTIONS)
+                .status("ACTIVE")
+                .build();
+    }
+
+    private String askAiForQuestionFromResume(
+            InterviewSession session, String resumeText, int questionNumber) {
+
+        String prompt = """
+            You are a technical interviewer conducting a personalized interview.
+            Difficulty: %s.
+            This is question %d of %d.
+            
+            The candidate's resume content is:
+            "%s"
+            
+            Based on the resume, ask ONE specific technical question about:
+            - Their mentioned skills or technologies
+            - Their projects or experience
+            - Concepts related to their background
+            
+            RULES:
+            - Ask ONE clear, specific question only
+            - No preamble or markdown
+            - Base the question on actual resume content
+            - Match the difficulty level
+            """.formatted(
+                session.getDifficulty(),
+                questionNumber,
+                TOTAL_QUESTIONS,
+                resumeText.length() > 2000
+                        ? resumeText.substring(0, 2000)
+                        : resumeText
+        );
+
+        return chatClientBuilder.build()
+                .prompt()
+                .user(prompt)
+                .call()
+                .content()
+                .trim();
+    }
 }
