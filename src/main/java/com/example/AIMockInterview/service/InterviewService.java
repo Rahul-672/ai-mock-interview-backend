@@ -5,11 +5,16 @@ import com.example.AIMockInterview.entity.*;
 import com.example.AIMockInterview.repository.*;
 import lombok.RequiredArgsConstructor;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executor;
+import java.util.concurrent.CompletableFuture;
+import org.springframework.cache.annotation.Cacheable;
 
 @Service
 @RequiredArgsConstructor
@@ -21,7 +26,7 @@ public class InterviewService {
     private final UserRepository userRepository;
 
     private static final int TOTAL_QUESTIONS = 5;
-
+    @CacheEvict(value = "userHistory", key = "#root.target.getCurrentUserEmail()")
     public InterviewResponse startInterview(StartInterviewRequest request) {
         User user = getCurrentUser();
 
@@ -53,39 +58,65 @@ public class InterviewService {
                 .orElseThrow(() -> new RuntimeException("Session not found"));
 
         int currentQ = session.getCurrentQuestion();
-
         saveMessage(session, "user", request.getAnswer(), currentQ, null);
 
-        double score = evaluateAnswer(session, request.getAnswer(), currentQ);
-
-        List<SessionMessage> messages = messageRepository.findBySessionOrderById(session);
-        messages.stream()
-                .filter(m -> m.getRole().equals("user") && m.getQuestionNumber() == currentQ)
-                .findFirst()
-                .ifPresent(msg -> {
-                    msg.setScore(score);
-                    messageRepository.save(msg);
-                });
-
+        // Check if interview is done
         if (currentQ >= TOTAL_QUESTIONS) {
+            double score = evaluateAnswer(session, request.getAnswer(), currentQ);
+            updateScore(session, currentQ, score);
             return completeInterview(session);
         }
 
-        int nextQ = currentQ + 1;
-        String nextQuestion = askAiForQuestion(session, request.getAnswer(), nextQ);
-        saveMessage(session, "assistant", nextQuestion, nextQ, null);
+        // Run evaluation AND next question generation in parallel
+        CompletableFuture<Double> scoreFuture = CompletableFuture
+                .supplyAsync(() -> evaluateAnswer(session, request.getAnswer(), currentQ),
+                        getAsyncExecutor());
 
-        session.setCurrentQuestion(nextQ);
+        CompletableFuture<String> nextQuestionFuture = CompletableFuture
+                .supplyAsync(() -> askAiForQuestion(session, request.getAnswer(), currentQ + 1),
+                        getAsyncExecutor());
+
+        // Wait for both to complete
+        CompletableFuture.allOf(scoreFuture, nextQuestionFuture).join();
+
+        double score = scoreFuture.join();
+        String nextQuestion = nextQuestionFuture.join();
+
+        updateScore(session, currentQ, score);
+        saveMessage(session, "assistant", nextQuestion, currentQ + 1, null);
+
+        session.setCurrentQuestion(currentQ + 1);
         sessionRepository.save(session);
 
         return InterviewResponse.builder()
                 .sessionId(session.getId())
                 .message(nextQuestion)
-                .questionNumber(nextQ)
+                .questionNumber(currentQ + 1)
                 .totalQuestions(TOTAL_QUESTIONS)
                 .score(score)
                 .status("ACTIVE")
                 .build();
+    }
+
+    // Helper method to get executor
+    private Executor getAsyncExecutor() {
+        return new ThreadPoolTaskExecutor() {{
+            setCorePoolSize(5);
+            setMaxPoolSize(10);
+            initialize();
+        }};
+    }
+
+    // Helper to update score
+    private void updateScore(InterviewSession session, int questionNumber, double score) {
+        List<SessionMessage> messages = messageRepository.findBySessionOrderById(session);
+        messages.stream()
+                .filter(m -> m.getRole().equals("user") && m.getQuestionNumber() == questionNumber)
+                .findFirst()
+                .ifPresent(msg -> {
+                    msg.setScore(score);
+                    messageRepository.save(msg);
+                });
     }
 
     private InterviewResponse completeInterview(InterviewSession session) {
@@ -229,6 +260,27 @@ public class InterviewService {
                 .toList();
     }
 
+    @Cacheable(value = "userHistory", key = "#root.target.getCurrentUserEmail()")
+    public List<Map<String, Object>> getUserHistory() {
+        User user = getCurrentUser();
+        List<InterviewSession> sessions = sessionRepository
+                .findByUserOrderByStartedAtDesc(user);
+
+        return sessions.stream()
+                .filter(s -> s.getStatus().equals("COMPLETED"))
+                .map(s -> {
+                    Map<String, Object> map = new java.util.LinkedHashMap<>();
+                    map.put("sessionId", s.getId());
+                    map.put("role", s.getRole());
+                    map.put("difficulty", s.getDifficulty());
+                    map.put("overallScore", s.getOverallScore());
+                    map.put("startedAt", s.getStartedAt().toString());
+                    map.put("feedbackReport", s.getFeedbackReport());
+                    return map;
+                })
+                .toList();
+    }
+
     private String generateFeedbackReport(InterviewSession session) {
         List<SessionMessage> messages = messageRepository.findBySessionOrderById(session);
 
@@ -319,6 +371,8 @@ public class InterviewService {
                 .build());
     }
 
+
+    @CacheEvict(value = "userHistory", key = "#root.target.getCurrentUserEmail()")
     public InterviewResponse startInterviewWithResume(
             ResumeInterviewRequest request) {
         User user = getCurrentUser();
@@ -345,6 +399,10 @@ public class InterviewService {
                 .totalQuestions(TOTAL_QUESTIONS)
                 .status("ACTIVE")
                 .build();
+    }
+
+    public String getCurrentUserEmail() {
+        return SecurityContextHolder.getContext().getAuthentication().getName();
     }
 
     private String askAiForQuestionFromResume(
